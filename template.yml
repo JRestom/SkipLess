@@ -1,0 +1,30 @@
+training:
+  model: "resnet50"  
+  dataset: "cifar10"  
+  num_classes: 10  
+  batch_size: 256  
+  epochs: 100 
+  lr: 0.001 
+  weight_decay: 0.05 
+  seed: 0  
+  save_weights: False
+  pretrained_weights: null  
+
+
+model_params:
+  skip_scheduler: 'cosine'  
+  start_value: 1.0  
+  final_skip_values: [0.2, 0.2, 0.2, 0.2]  
+  update_per_batch: False  
+
+
+wandb:
+  enable: True  
+  project: "Drop_skip"  
+  entity: "restom10"  
+  run_name: "resnet50_seed_0_sch_cosine_stg_fixed_scalar_0.2"  
+  group: "cifar"  
+
+extended_training:
+  extend: False  
+
