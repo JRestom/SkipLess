@@ -13,9 +13,10 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
-from torchvision.datasets import CIFAR10, CIFAR100
+from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
 from models import resnet50, resnet50bn, vit_base, resnet18, resnet34, dirac18, dirac34, dirac50
 from utils import compute_stage_grad_norms
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 
 
 def setup(rank, world_size):
@@ -42,24 +43,47 @@ def main_worker(rank, world_size, args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    train_transforms = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
-    ])
-    test_transforms = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
-    ])
-
+    # Transforms
     dataset_name = config['training']['dataset']
+
+    if dataset_name == 'imagenet':
+        train_transforms = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        test_transforms = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    else:
+        train_transforms = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+        ])
+        test_transforms = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+        ])
+
+    
     if dataset_name == 'cifar10':
         train_dataset = CIFAR10(root="./data_cifar", train=True, download=True, transform=train_transforms)
         test_dataset = CIFAR10(root="./data_cifar", train=False, download=True, transform=test_transforms)
     elif dataset_name == 'cifar100':
         train_dataset = CIFAR100(root="./data_cifar100", train=True, download=True, transform=train_transforms)
         test_dataset = CIFAR100(root="./data_cifar100", train=False, download=True, transform=test_transforms)
+    elif dataset_name == 'imagenet':
+        train_dataset = ImageFolder(root=config['data']['imagenet_train_path'], transform=train_transforms)
+        test_dataset = ImageFolder(root=config['data']['imagenet_val_path'], transform=test_transforms)
+
     else:
         raise ValueError("Unsupported dataset")
 
@@ -68,7 +92,7 @@ def main_worker(rank, world_size, args):
         train_dataset,
         batch_size=config['training']['batch_size'],
         sampler=train_sampler,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True
     )
 
@@ -150,15 +174,58 @@ def main_worker(rank, world_size, args):
         raise ValueError("Unsupported model")
 
     model = model.to(device)
+    pretrained_weights = config['training'].get('pretrained_weights', None)
+
+    if pretrained_weights:
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}  # maps weights properly for DDP
+        model.load_state_dict(torch.load(pretrained_weights, map_location=map_location))
+
+        if rank == 0:
+            print(f"✅ Loaded pretrained weights from {pretrained_weights}")
+
+    
+
     model = DDP(model, device_ids=[rank])
 
+    base_lr = config['training']['lr']
+    per_gpu_batch_size = config['training']['batch_size']
+    scaled_lr = base_lr * (per_gpu_batch_size * 4) / 256
+    config['training']['lr'] = scaled_lr
+
+    
     optimizer = optim.AdamW(model.parameters(), lr=config['training']['lr'], weight_decay=config['training']['weight_decay'])
+
     total_steps = len(train_loader) * epochs
     warmup_steps = int(0.1 * total_steps)
     lrs = torch.cat([
         torch.linspace(0, config['training']['lr'], warmup_steps),
         torch.linspace(config['training']['lr'], 0, total_steps - warmup_steps)
     ])
+
+    # optimizer = torch.optim.SGD(
+    # model.parameters(), 
+    # lr=config['training']['lr'], 
+    # momentum=0.9, 
+    # weight_decay=config['training']['weight_decay'])
+
+    #warmup_epochs = int(0.1 * config['training']['epochs'])  # e.g., 10% of total
+    #main_epochs = config['training']['epochs'] - warmup_epochs
+
+    # Warmup: Linear increase from 0 -> base LR
+    #warmup_scheduler = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_epochs)
+
+    # Main: Cosine decay
+    #cosine_scheduler = CosineAnnealingLR(optimizer, T_max=main_epochs)
+
+    # Combine both into a sequential scheduler
+    #scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
+
+    # total_steps = len(train_loader) * epochs
+    # warmup_steps = int(0.1 * total_steps)
+    # lrs = torch.cat([
+    #     torch.linspace(0, config['training']['lr'], warmup_steps),
+    #     torch.linspace(config['training']['lr'], 0, total_steps - warmup_steps)
+    # ])
 
     for epoch in range(1, epochs + 1):
         train_sampler.set_epoch(epoch)
@@ -219,6 +286,8 @@ def main_worker(rank, world_size, args):
                     **{f"skip_scale/{stage}": scale for stage, scale in model.module.get_skip_scales().items()}
                 })
 
+        #scheduler.step()
+
         # Evaluation on one rank only
         if rank == 0:
             model.eval()
@@ -237,6 +306,11 @@ def main_worker(rank, world_size, args):
             print(f"Validation Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
             if config['wandb']['enable']:
                 wandb.log({"val_loss": val_loss, "val_accuracy": val_acc})
+
+    if rank == 0 and config.get("training", {}).get("save_weights", False):
+        save_path = f"{config['wandb']['run_name']}.pth"
+        torch.save(model.module.state_dict(), save_path)
+        print(f"✅ Model weights saved to {save_path}")
 
     cleanup()
 
