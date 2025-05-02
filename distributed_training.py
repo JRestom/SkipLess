@@ -14,14 +14,17 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
-from models import resnet50, resnet50bn, vit_base, resnet18, resnet34, dirac18, dirac34, dirac50
+from models import resnet50, resnet50bn, vit_base, resnet18, resnet34, dirac18, dirac34, dirac50, resnet101, resnet152
 from utils import compute_stage_grad_norms
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+from tqdm import tqdm
+import math
+
 
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = os.environ.get('MASTER_PORT', '29500')
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
     print(f"[Rank {rank}] Visible CUDA devices: {torch.cuda.device_count()}, using device {torch.cuda.current_device()}")
@@ -92,7 +95,7 @@ def main_worker(rank, world_size, args):
         train_dataset,
         batch_size=config['training']['batch_size'],
         sampler=train_sampler,
-        num_workers=8,
+        num_workers=16,
         pin_memory=True
     )
 
@@ -149,9 +152,19 @@ def main_worker(rank, world_size, args):
 
     # Initialized model
     if model_name == 'resnet50':
-        model = resnet50(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
-                         final_skip_values=final_skip_values, start_value=start_value,
-                         min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+        # model = resnet50(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+        #                  final_skip_values=final_skip_values, start_value=start_value,
+        #                  min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+
+        model_path = config['training']['pretrained_weights']
+        assert model_path.endswith('.pt'), "Expected full model file (.pt), not state_dict (.pth)"
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        model = torch.load(model_path, map_location=map_location)
+        model = model.to(device)
+        print(model)
+
+   
+    
     elif model_name == 'resnet18':
         model = resnet18(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
                          final_skip_values=final_skip_values, start_value=start_value,
@@ -164,24 +177,38 @@ def main_worker(rank, world_size, args):
         model = vit_base(num_classes=num_classes, img_size=32, patch=8, hidden=384, num_layers=7, head=8,
                          dropout=0, is_cls_token=True, skip_scalar=skip_scalar, start_value=start_value,
                          scheduler_type=scheduler_type, total_epochs=epochs, final_skip=final_skip_values[0])
+
     elif model_name == 'dirac18':
         model = dirac18(num_classes=num_classes)
+
     elif model_name == 'dirac34':
         model = dirac34(num_classes=num_classes)
+
     elif model_name == 'dirac50':
         model = dirac50(num_classes=num_classes)
+
+    elif model_name == 'resnet101':
+        model = resnet101(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+                          final_skip_values=final_skip_values, start_value=start_value,
+                          min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+
+    elif model_name == 'resnet152':
+        model = resnet152(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+                          final_skip_values=final_skip_values, start_value=start_value,
+                          min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+        
     else:
         raise ValueError("Unsupported model")
 
     model = model.to(device)
     pretrained_weights = config['training'].get('pretrained_weights', None)
 
-    if pretrained_weights:
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}  # maps weights properly for DDP
-        model.load_state_dict(torch.load(pretrained_weights, map_location=map_location))
+    # if pretrained_weights:
+    #     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}  # maps weights properly for DDP
+    #     model.load_state_dict(torch.load(pretrained_weights, map_location=map_location))
 
-        if rank == 0:
-            print(f"✅ Loaded pretrained weights from {pretrained_weights}")
+    #     if rank == 0:
+    #         print(f"✅ Loaded pretrained weights from {pretrained_weights}")
 
     
 
@@ -197,10 +224,17 @@ def main_worker(rank, world_size, args):
 
     total_steps = len(train_loader) * epochs
     warmup_steps = int(0.1 * total_steps)
-    lrs = torch.cat([
-        torch.linspace(0, config['training']['lr'], warmup_steps),
-        torch.linspace(config['training']['lr'], 0, total_steps - warmup_steps)
-    ])
+
+    lrs = torch.tensor([
+        config['training']['lr'] * step / warmup_steps if step < warmup_steps else
+        0.5 * config['training']['lr'] * (1 + math.cos(math.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
+        for step in range(total_steps)
+    ], dtype=torch.float32)
+
+    # lrs = torch.cat([
+    #     torch.linspace(0, config['training']['lr'], warmup_steps),
+    #     torch.linspace(config['training']['lr'], 0, total_steps - warmup_steps)
+    # ])
 
     # optimizer = torch.optim.SGD(
     # model.parameters(), 
@@ -232,19 +266,23 @@ def main_worker(rank, world_size, args):
         model.train()
 
         if not update_per_batch:
-            model.module.update_skip_scale(epoch, total_steps=final_skip_epoch)
+            pass
+            #model.module.update_skip_scale(epoch, total_steps=final_skip_epoch)
 
         running_loss, total_correct, total_samples = 0.0, 0, 0
         epoch_stage_gradients = {f"stage{i+1}": [] for i in range(4)} if model_name != 'vit_base' else []
 
         total_batches = final_skip_epoch * len(train_loader)
         
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} [Training]", leave=False)
+        for batch_idx, (inputs, targets) in enumerate(progress_bar):
+        # for batch_idx, (inputs, targets) in enumerate(train_loader):
             global_step = (epoch - 1) * len(train_loader) + batch_idx
             inputs, targets = inputs.to(device), targets.to(device)
 
             if update_per_batch:
-                model.module.update_skip_scale(epoch, total_steps=final_skip_epoch)
+                pass
+                #model.module.update_skip_scale(epoch, total_steps=final_skip_epoch)
 
             for group in optimizer.param_groups:
                 group['lr'] = lrs[global_step]

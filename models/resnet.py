@@ -491,6 +491,36 @@ def resnet34(num_classes=10, pretrained=False, scheduler_type='linear', total_ep
     
     return ResNet(BasicBlock, [3, 4, 6, 3], num_classes=num_classes, pretrained=pretrained, scheduler_type=scheduler_type, total_epochs=total_epochs, final_skip_values=final_skip_values, update_per_batch=update_per_batch, start_value=start_value, min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
 
+def resnet101(num_classes=10, pretrained=False, scheduler_type='linear', total_epochs=100, final_skip_values=None, update_per_batch=False, start_value=None, min_bitwidth=32, enable_quantization=False):
+    return ResNet(Bottleneck, [3, 4, 23, 3],  
+        num_classes=num_classes,
+        pretrained=pretrained,
+        scheduler_type=scheduler_type,
+        total_epochs=total_epochs,
+        final_skip_values=final_skip_values,
+        update_per_batch=update_per_batch,
+        start_value=start_value,
+        min_bitwidth=min_bitwidth,
+        enable_quantization=enable_quantization
+    )
+
+def resnet152(num_classes=10, pretrained=False, scheduler_type='linear', total_epochs=100,
+              final_skip_values=None, update_per_batch=False, start_value=None,
+              min_bitwidth=32, enable_quantization=False):
+    return ResNet(
+        Bottleneck,
+        [3, 8, 36, 3],  
+        num_classes=num_classes,
+        pretrained=pretrained,
+        scheduler_type=scheduler_type,
+        total_epochs=total_epochs,
+        final_skip_values=final_skip_values,
+        update_per_batch=update_per_batch,
+        start_value=start_value,
+        min_bitwidth=min_bitwidth,
+        enable_quantization=enable_quantization
+    )
+
 def dirac18(num_classes=10):
     return ResNet(
         DiracBasicBlock,       # <--- the block we just defined
