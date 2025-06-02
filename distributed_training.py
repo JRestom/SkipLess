@@ -15,10 +15,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
 from models import resnet50, resnet50bn, vit_base, resnet18, resnet34, dirac18, dirac34, dirac50, resnet101, resnet152
-from utils import compute_stage_grad_norms
+from utils import compute_stage_grad_norms, build_model_from_config
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from tqdm import tqdm
 import math
+
 
 
 
@@ -105,7 +106,7 @@ def main_worker(rank, world_size, args):
             test_dataset,
             batch_size=config['training']['batch_size'],
             shuffle=False,  # no shuffle for evaluation
-            num_workers=4,
+            num_workers=8,
             pin_memory=True
         )
     else:
@@ -150,58 +151,80 @@ def main_worker(rank, world_size, args):
             config=config
         )
 
-    # Initialized model
-    if model_name == 'resnet50':
-        # model = resnet50(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
-        #                  final_skip_values=final_skip_values, start_value=start_value,
-        #                  min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+    
 
-        model_path = config['training']['pretrained_weights']
-        assert model_path.endswith('.pt'), "Expected full model file (.pt), not state_dict (.pth)"
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
-        model = torch.load(model_path, map_location=map_location)
-        model = model.to(device)
-        print(model)
+
+    # # Initialized model
+    # if model_name == 'resnet50':
+    #     model = resnet50(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+    #                      final_skip_values=final_skip_values, start_value=start_value,
+    #                      min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+    #     model_path = config['training']['pretrained_weights']
+    #     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+
+    #     if model_path.endswith('.pt'):
+    #         # Full model saved with torch.save(model)
+    #         model = torch.load(model_path, map_location=map_location)
+
+    #     elif model_path.endswith('.pth'):
+            
+    #         model = resnet50(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+    #                      final_skip_values=final_skip_values, start_value=start_value,
+    #                      min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+    #         state_dict = torch.load(model_path, map_location=map_location)
+    #         model.load_state_dict(state_dict)
+    #     else:
+    #         raise ValueError("Unsupported model file type. Use '.pt' or '.pth'.")
+
+    #     model = model.to(device)
+
+    #     # model_path = config['training']['pretrained_weights']
+    #     # assert model_path.endswith('.pt'), "Expected full model file (.pt), not state_dict (.pth)"
+    #     # map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    #     # model = torch.load(model_path, map_location=map_location)
+    #     # model = model.to(device)
+    #     print(model)
 
    
     
-    elif model_name == 'resnet18':
-        model = resnet18(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
-                         final_skip_values=final_skip_values, start_value=start_value,
-                         min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
-    elif model_name == 'resnet34':
-        model = resnet34(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
-                         final_skip_values=final_skip_values, start_value=start_value,
-                         min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
-    elif model_name == 'vit_base':
-        model = vit_base(num_classes=num_classes, img_size=32, patch=8, hidden=384, num_layers=7, head=8,
-                         dropout=0, is_cls_token=True, skip_scalar=skip_scalar, start_value=start_value,
-                         scheduler_type=scheduler_type, total_epochs=epochs, final_skip=final_skip_values[0])
+    # elif model_name == 'resnet18':
+    #     model = resnet18(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+    #                      final_skip_values=final_skip_values, start_value=start_value,
+    #                      min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+    # elif model_name == 'resnet34':
+    #     model = resnet34(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+    #                      final_skip_values=final_skip_values, start_value=start_value,
+    #                      min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
 
-    elif model_name == 'dirac18':
-        model = dirac18(num_classes=num_classes)
+    # elif model_name == 'vit_base':
+    #     model = vit_base(num_classes=num_classes, img_size=32, patch=8, hidden=384, num_layers=7, head=8,
+    #                      dropout=0, is_cls_token=True, skip_scalar=skip_scalar, start_value=start_value,
+    #                      scheduler_type=scheduler_type, total_epochs=epochs, final_skip=final_skip_values[0])
 
-    elif model_name == 'dirac34':
-        model = dirac34(num_classes=num_classes)
+    # elif model_name == 'dirac18':
+    #     model = dirac18(num_classes=num_classes)
 
-    elif model_name == 'dirac50':
-        model = dirac50(num_classes=num_classes)
+    # elif model_name == 'dirac34':
+    #     model = dirac34(num_classes=num_classes)
 
-    elif model_name == 'resnet101':
-        model = resnet101(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
-                          final_skip_values=final_skip_values, start_value=start_value,
-                          min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+    # elif model_name == 'dirac50':
+    #     model = dirac50(num_classes=num_classes)
 
-    elif model_name == 'resnet152':
-        model = resnet152(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
-                          final_skip_values=final_skip_values, start_value=start_value,
-                          min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+    # elif model_name == 'resnet101':
+    #     model = resnet101(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+    #                       final_skip_values=final_skip_values, start_value=start_value,
+    #                       min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
+
+    # elif model_name == 'resnet152':
+    #     model = resnet152(num_classes=num_classes, scheduler_type=scheduler_type, total_epochs=epochs,
+    #                       final_skip_values=final_skip_values, start_value=start_value,
+    #                       min_bitwidth=min_bitwidth, enable_quantization=enable_quantization)
         
-    else:
-        raise ValueError("Unsupported model")
+    # else:
+    #     raise ValueError("Unsupported model")
 
-    model = model.to(device)
-    pretrained_weights = config['training'].get('pretrained_weights', None)
+    # model = model.to(device)
+    # pretrained_weights = config['training'].get('pretrained_weights', None)
 
     # if pretrained_weights:
     #     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}  # maps weights properly for DDP
@@ -211,9 +234,8 @@ def main_worker(rank, world_size, args):
     #         print(f"✅ Loaded pretrained weights from {pretrained_weights}")
 
     
-
-    model = DDP(model, device_ids=[rank])
-
+    model = build_model_from_config(config, rank, device)
+    
     base_lr = config['training']['lr']
     per_gpu_batch_size = config['training']['batch_size']
     scaled_lr = base_lr * (per_gpu_batch_size * 4) / 256
@@ -225,42 +247,14 @@ def main_worker(rank, world_size, args):
     total_steps = len(train_loader) * epochs
     warmup_steps = int(0.1 * total_steps)
 
+    # Cosine
     lrs = torch.tensor([
         config['training']['lr'] * step / warmup_steps if step < warmup_steps else
         0.5 * config['training']['lr'] * (1 + math.cos(math.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
         for step in range(total_steps)
     ], dtype=torch.float32)
 
-    # lrs = torch.cat([
-    #     torch.linspace(0, config['training']['lr'], warmup_steps),
-    #     torch.linspace(config['training']['lr'], 0, total_steps - warmup_steps)
-    # ])
-
-    # optimizer = torch.optim.SGD(
-    # model.parameters(), 
-    # lr=config['training']['lr'], 
-    # momentum=0.9, 
-    # weight_decay=config['training']['weight_decay'])
-
-    #warmup_epochs = int(0.1 * config['training']['epochs'])  # e.g., 10% of total
-    #main_epochs = config['training']['epochs'] - warmup_epochs
-
-    # Warmup: Linear increase from 0 -> base LR
-    #warmup_scheduler = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_epochs)
-
-    # Main: Cosine decay
-    #cosine_scheduler = CosineAnnealingLR(optimizer, T_max=main_epochs)
-
-    # Combine both into a sequential scheduler
-    #scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
-
-    # total_steps = len(train_loader) * epochs
-    # warmup_steps = int(0.1 * total_steps)
-    # lrs = torch.cat([
-    #     torch.linspace(0, config['training']['lr'], warmup_steps),
-    #     torch.linspace(config['training']['lr'], 0, total_steps - warmup_steps)
-    # ])
-
+   
     for epoch in range(1, epochs + 1):
         train_sampler.set_epoch(epoch)
         model.train()
@@ -276,7 +270,6 @@ def main_worker(rank, world_size, args):
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} [Training]", leave=False)
         for batch_idx, (inputs, targets) in enumerate(progress_bar):
-        # for batch_idx, (inputs, targets) in enumerate(train_loader):
             global_step = (epoch - 1) * len(train_loader) + batch_idx
             inputs, targets = inputs.to(device), targets.to(device)
 
@@ -346,9 +339,16 @@ def main_worker(rank, world_size, args):
                 wandb.log({"val_loss": val_loss, "val_accuracy": val_acc})
 
     if rank == 0 and config.get("training", {}).get("save_weights", False):
-        save_path = f"{config['wandb']['run_name']}.pth"
-        torch.save(model.module.state_dict(), save_path)
-        print(f"✅ Model weights saved to {save_path}")
+
+        run_name=config['wandb']['run_name']
+        
+        # Save state dict (.pth)
+        state_dict_path = f"{run_name}.pth"
+        torch.save(model.module.state_dict(), state_dict_path)
+
+        # Save full model (.pt)
+        full_model_path = f"{run_name}.pt"
+        torch.save(model.module, full_model_path)
 
     cleanup()
 
